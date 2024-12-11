@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Realtime AI Voice Assistant</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+
+        .input-container {
+            margin-bottom: 20px;
+        }
+
+        #api-key {
+            width: 50%;
+            padding: 10px;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+
+        #toggle-mic {
+            background-color: #004089;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        #toggle-mic:hover {
+            background-color: #003366;
+        }
+
+        #status {
+            margin-top: 20px;
+        }
+
+        #instructions {
+            margin-bottom: 20px;
+            font-size: 14px;
+            color: #555;
+        }
+
+        #instructions p {
+            margin: 0 0 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Realtime AI Voice Assistant</h1>
+    <div id="instructions">
+        <p>Enter your OpenAI API key below, then use the "Toggle Mic" button to start/stop sending audio to the assistant.</p>
+        <p>The assistant will respond with spoken words and always in english.</p>
+    </div>
+    <div class="input-container">
+        <input type="text" id="api-key" placeholder="Enter your OpenAI API Key here...">
+        <button id="toggle-mic">Toggle Mic</button>
+    </div>
+    <div id="status">Status: Not recording</div>
+
+    <script>
+        // Create a fake process.env object so that the unchanged code can use it.
+        window.process = { env: {} };
+
+        const toggleMicBtn = document.getElementById('toggle-mic');
+        const apiKeyInput = document.getElementById('api-key');
+        const statusDiv = document.getElementById('status');
+
+        let micOn = false;
+        let scriptAppended = false; // To ensure we only insert the code once
+
+        toggleMicBtn.addEventListener('click', () => {
+            const apiKey = apiKeyInput.value.trim();
+            if (apiKey === '') {
+                alert("Please enter your OpenAI API Key first.");
+                return;
+            }
+
+            micOn = !micOn;
+            if (micOn) {
+                // Set the environment variable for the code snippet
+                window.process.env.OPENAI_API_KEY = apiKey;
+
+                // Only append the snippet code once:
+                if (!scriptAppended) {
+                    const snippetContent = document.getElementById('snippet-template').textContent;
+                    const script = document.createElement('script');
+                    script.type = 'module';
+                    script.textContent = snippetContent;
+                    document.body.appendChild(script);
+                    scriptAppended = true;
+                }
+
+                statusDiv.textContent = "Status: Recording...";
+                toggleMicBtn.textContent = "Stop Mic";
+            } else {
+                statusDiv.textContent = "Status: Not recording";
+                toggleMicBtn.textContent = "Toggle Mic";
+            }
+        });
+    </script>
+
+    <!-- Storing the original code in a script tag as text so we do not modify it one bit.
+         We will insert it dynamically once the API key is set and mic is toggled on. -->
+    <script type="text/plain" id="snippet-template">
+import WebSocket from 'ws';
+import { spawn } from 'child_process';
+
+const url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
+const ws = new WebSocket(url, {
+  headers: {
+    'Authorization': 'Bearer ' + process.env.OPENAI_API_KEY,
+    'OpenAI-Beta': 'realtime=v1'
+  }
+});
+
+const instructions = `Always answer in English`;
+
+const recorder = spawn('sox', [
+  '--default-device',
+  '--no-show-progress',
+  '--rate', '24000',
+  '--channels', '1',
+  '--encoding', 'signed-integer',
+  '--bits', '16',
+  '--type', 'raw',
+  '-'
+]);
+const recorderStream = recorder.stdout;
+
+const player = spawn('sox', [
+  '--type', 'raw',
+  '--rate', '24000',
+  '--encoding', 'signed-integer',
+  '--bits', '16',
+  '--channels', '1',
+  '-',
+  '--no-show-progress',
+  '--default-device',
+]);
+const audioStream = player.stdin;
+
+ws.on('open', () => {
+  ws.send(JSON.stringify({
+    type: 'session.update',
+    session: {
+      voice: 'echo',
+      instructions: instructions,
+      input_audio_transcription: { model: 'whisper-1' },
+      turn_detection: { type: "server_vad" }
+    }
+  }));
+
+  recorderStream.on('data', (chunk: Buffer) => {
+    ws.send(JSON.stringify({
+      type: 'input_audio_buffer.append',
+      audio: chunk.toString('base64')
+    }));
+  });
+});
+
+ws.on('message', (message) => {
+  const event = JSON.parse(message.toString());
+  console.log(event.type);
+  switch (event.type) {
+    case 'response.audio.delta':
+      audioStream.write(Buffer.from(event.delta, 'base64'));
+      break;
+    case 'response.audio_transcript.done':
+    case 'conversation.item.input_audio_transcription.completed':
+      console.log(event.type, event.transcript);
+      break;
+    case 'error':
+      console.error('ERROR', event.error);
+      break;
+  }
+});
+
+ws.on('error', (error) => {
+  console.error('WebSocketエラー', { error });
+});
+
+ws.on('close', (event) => {
+  console.log('close connection');
+  audioStream.end();
+  recorderStream.pause();
+  recorder.kill('SIGHUP');
+  player.kill('SIGHUP');
+  process.exit();
+});
+
+// 標準入力を待機。`q`で終了
+process.stdin.resume();
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (input: string) => {
+  if (input.trim().toLowerCase() === 'q') {
+    console.log('終了します...');
+    ws.close();
+    setTimeout(() => {
+      process.exit();
+    }, 1000);
+  }
+});
+    </script>
+</body>
+</html>
